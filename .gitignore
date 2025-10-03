@@ -1,0 +1,14 @@
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Local DB / exports
+worklog.db
+*.db
+*.sqlite
+export.csv
+export.xlsx
+
+# Virtual environment
+.venv/

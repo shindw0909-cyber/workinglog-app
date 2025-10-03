@@ -7,6 +7,28 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).with_name("worklog.db")
 
+# ---------------- Password Gate (via Secrets) ----------------
+def _check_password():
+    def _pw_entered():
+        if st.session_state.get("pw", "") == st.secrets.get("APP_PASSWORD"):
+            st.session_state["auth_ok"] = True
+            st.session_state.pop("pw", None)
+        else:
+            st.session_state["auth_ok"] = False
+
+    if st.session_state.get("auth_ok"):
+        return True
+
+    st.title("업무 정리 앱 🔐")
+    st.caption("접속에는 비밀번호가 필요합니다.")
+    st.text_input("비밀번호", type="password", key="pw", on_change=_pw_entered)
+    if "auth_ok" in st.session_state and not st.session_state["auth_ok"]:
+        st.error("비밀번호가 틀렸습니다.")
+    st.stop()
+
+# Call password gate BEFORE any content renders
+_check_password()
+
 # ---------------- DB ----------------
 def init_db():
     with sqlite3.connect(DB_PATH) as con:
@@ -44,6 +66,7 @@ def insert_entry(e):
 
 def fetch_df(query="SELECT * FROM entries ORDER BY date DESC, id DESC", params=()):
     with sqlite3.connect(DB_PATH) as con:
+        import pandas as pd
         df = pd.read_sql_query(query, con, params=params)
     return df
 
@@ -119,7 +142,6 @@ def page_customer():
 
     st.markdown("---")
     st.write("**요약 리포트**")
-    # 간단한 월별 건수 집계
     if not df.empty:
         tmp = df.copy()
         tmp["month"] = pd.to_datetime(tmp["date"]).dt.to_period("M").astype(str)
@@ -136,16 +158,15 @@ def page_search_export():
     st.caption(f"검색 결과: {len(df)}건")
     st.dataframe(df, use_container_width=True, height=400)
 
-    # Export buttons
     col1, col2 = st.columns(2)
     with col1:
         if st.button("CSV로 내보내기", use_container_width=True):
             df.to_csv("export.csv", index=False, encoding="utf-8-sig")
-            st.success("export.csv 로 저장 완료 (앱 폴더).")
+            st.success("export.csv 로 저장 완료.")
     with col2:
         if st.button("Excel(xlsx)로 내보내기", use_container_width=True):
             df.to_excel("export.xlsx", index=False)
-            st.success("export.xlsx 로 저장 완료 (앱 폴더).")
+            st.success("export.xlsx 로 저장 완료.")
 
 # -------------- Main --------------
 def main():
