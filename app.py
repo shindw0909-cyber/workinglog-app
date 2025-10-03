@@ -2,7 +2,7 @@
 import streamlit as st
 import sqlite3
 import pandas as pd
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).with_name("worklog.db")
@@ -26,18 +26,19 @@ def _check_password():
         st.error("비밀번호가 틀렸습니다.")
     st.stop()
 
-# Call password gate BEFORE any content renders
 _check_password()
 
 # ---------------- DB ----------------
 def init_db():
     with sqlite3.connect(DB_PATH) as con:
         cur = con.cursor()
+        # base table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS entries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             date TEXT NOT NULL,
             customer TEXT NOT NULL,
+            project TEXT,
             contact TEXT,
             summary TEXT NOT NULL,
             actions TEXT,
@@ -46,8 +47,17 @@ def init_db():
             created_at TEXT NOT NULL
         )
         """)
+        con.commit()
+        # add missing columns for upgrades
+        cur.execute("PRAGMA table_info(entries)")
+        cols = {row[1] for row in cur.fetchall()}
+        if "project" not in cols:
+            cur.execute("ALTER TABLE entries ADD COLUMN project TEXT")
+        con.commit()
+        # helpful indexes
         cur.execute("CREATE INDEX IF NOT EXISTS idx_date ON entries(date)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_customer ON entries(customer)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_project ON entries(project)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_tags ON entries(tags)")
         con.commit()
 
@@ -55,18 +65,17 @@ def insert_entry(e):
     with sqlite3.connect(DB_PATH) as con:
         cur = con.cursor()
         cur.execute("""
-            INSERT INTO entries (date, customer, contact, summary, actions, next_steps, tags, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO entries (date, customer, project, contact, summary, actions, next_steps, tags, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            e["date"], e["customer"], e.get("contact",""), e["summary"], e.get("actions",""),
-            e.get("next_steps",""), e.get("tags",""),
+            e["date"], e["customer"], e.get("project",""), e.get("contact",""), e["summary"],
+            e.get("actions",""), e.get("next_steps",""), e.get("tags",""),
             datetime.now().isoformat(timespec="seconds")
         ))
         con.commit()
 
 def fetch_df(query="SELECT * FROM entries ORDER BY date DESC, id DESC", params=()):
     with sqlite3.connect(DB_PATH) as con:
-        import pandas as pd
         df = pd.read_sql_query(query, con, params=params)
     return df
 
@@ -74,16 +83,15 @@ def search_entries(q):
     like = f"%{q}%"
     sql = """
     SELECT * FROM entries
-    WHERE date LIKE ? OR customer LIKE ? OR contact LIKE ?
-       OR summary LIKE ? OR actions LIKE ? OR next_steps LIKE ?
-       OR tags LIKE ?
+    WHERE date LIKE ? OR customer LIKE ? OR project LIKE ? OR contact LIKE ?
+       OR summary LIKE ? OR actions LIKE ? OR next_steps LIKE ? OR tags LIKE ?
     ORDER BY date DESC, id DESC
     """
-    return fetch_df(sql, (like, like, like, like, like, like, like))
+    return fetch_df(sql, (like, like, like, like, like, like, like, like))
 
-def get_customers():
-    df = fetch_df("SELECT DISTINCT customer FROM entries ORDER BY customer ASC")
-    return sorted(df["customer"].dropna().tolist())
+def get_distinct(field):
+    df = fetch_df(f"SELECT DISTINCT {field} FROM entries WHERE IFNULL({field},'')<>'' ORDER BY {field} ASC")
+    return sorted(df[field].dropna().tolist())
 
 # -------------- UI Helpers --------------
 def entry_form():
@@ -92,8 +100,13 @@ def entry_form():
     with col1:
         d = st.date_input("날짜", value=date.today(), format="YYYY-MM-DD")
         customer = st.text_input("고객사 *", placeholder="예: 현대차 / NEXVEL / LS오토모티브")
-        contact = st.text_input("담당자/직책", placeholder="예: 김대리 / 구매팀")
+        # project quick-pick or free text
+        existing = [""] + get_distinct("project")
+        project = st.selectbox("프로젝트(선택)", existing, index=0, help="기존 목록에서 선택하거나 아래에 새 프로젝트명을 입력하세요.")
+        new_project = st.text_input("새 프로젝트명(없으면 비워두기)", placeholder="예: BlueV 전동액슬 적용 / BLDC 샤프트 코팅")
+        project = new_project.strip() if new_project.strip() else project.strip()
     with col2:
+        contact = st.text_input("담당자/직책", placeholder="예: 김대리 / 구매팀")
         tags = st.text_input("태그(쉼표 구분)", placeholder="예: EV,샘플,윤활유")
 
     summary = st.text_area("오늘 진행 요약 *", height=120, placeholder="무엇을, 왜, 어떻게 진행했는지 한 문단으로")
@@ -110,6 +123,7 @@ def entry_form():
         insert_entry({
             "date": d.strftime("%Y-%m-%d"),
             "customer": customer.strip(),
+            "project": project,
             "contact": contact.strip(),
             "summary": summary.strip(),
             "actions": actions.strip(),
@@ -128,29 +142,61 @@ def page_daily():
     st.dataframe(df, use_container_width=True)
 
 def page_customer():
-    st.subheader("Browse by Customer (고객별 보기)")
-    customers = get_customers()
+    st.subheader("Customer Overview (고객사별 히스토리)")
+    customers = get_distinct("customer")
     if not customers:
-        st.info("아직 고객 데이터가 없습니다. 먼저 Add Entry에서 기록을 추가하세요.")
+        st.info("먼저 기록을 추가하세요.")
         return
-    col1, col2 = st.columns([2,1])
-    with col1:
-        cust = st.selectbox("고객 선택", customers, index=0)
+    cust = st.selectbox("고객 선택", customers, index=0)
     df = fetch_df("SELECT * FROM entries WHERE customer=? ORDER BY date DESC, id DESC", (cust,))
     st.caption(f"총 {len(df)}건")
     st.dataframe(df, use_container_width=True)
 
-    st.markdown("---")
-    st.write("**요약 리포트**")
+    st.markdown("### 고객사 내 프로젝트 요약")
     if not df.empty:
         tmp = df.copy()
-        tmp["month"] = pd.to_datetime(tmp["date"]).dt.to_period("M").astype(str)
-        pivot = tmp.groupby("month")["id"].count().reset_index().rename(columns={"id":"entries"})
-        st.dataframe(pivot, use_container_width=True)
+        tmp["last_activity"] = pd.to_datetime(tmp["date"])
+        agg = tmp.groupby(tmp["project"].fillna("").replace("", "(프로젝트 미지정)")).agg(
+            entries=("id","count"),
+            last_date=("last_activity","max"),
+        ).reset_index().rename(columns={"project":"project"})
+        # days since
+        agg["days_since"] = (pd.Timestamp.today().normalize() - agg["last_date"]).dt.days
+        st.dataframe(agg.sort_values(["days_since","project"]), use_container_width=True)
+
+def page_project():
+    st.subheader("Project Overview (프로젝트별 진행상황)")
+    projects = get_distinct("project")
+    if not projects:
+        st.info("프로젝트가 아직 없습니다. 기록 추가 시 프로젝트명을 입력해보세요.")
+        return
+    proj = st.selectbox("프로젝트 선택", projects, index=0)
+    df = fetch_df("SELECT * FROM entries WHERE project=? ORDER BY date DESC, id DESC", (proj,))
+    st.caption(f"총 {len(df)}건")
+    st.dataframe(df, use_container_width=True)
+
+    # Timeline / last activity / upcoming
+    st.markdown("### 프로젝트 스냅샷")
+    if not df.empty:
+        last_date = pd.to_datetime(df["date"]).max()
+        last_summary = df.loc[pd.to_datetime(df["date"]).idxmax(), "summary"]
+        open_next = df[df["next_steps"].str.len()>0]["next_steps"].head(5).tolist()
+        col1, col2 = st.columns(2)
+        with col1:
+            st.metric("마지막 활동일", str(last_date.date()))
+            st.write("**마지막 활동 요약**")
+            st.write(last_summary)
+        with col2:
+            st.write("**다음 액션(상위 5)**")
+            if open_next:
+                for i, n in enumerate(open_next, 1):
+                    st.write(f"- {n}")
+            else:
+                st.write("등록된 다음 액션이 없습니다.")
 
 def page_search_export():
     st.subheader("Search & Export (검색/내보내기)")
-    q = st.text_input("검색어", placeholder="고객, 담당자, 요약/액션/다음액션, 태그에서 검색")
+    q = st.text_input("검색어", placeholder="고객, 프로젝트, 담당자, 요약/액션/다음액션, 태그에서 검색")
     if q:
         df = search_entries(q)
     else:
@@ -170,14 +216,16 @@ def page_search_export():
 
 # -------------- Main --------------
 def main():
-    st.set_page_config(page_title="업무 리스트 정리", layout="wide")
+    st.set_page_config(page_title="업무 리스트 정리 (프로젝트 트래커)", layout="wide")
     init_db()
     st.sidebar.title("업무 정리 도우미")
-    page = st.sidebar.radio("메뉴", ["Add Entry", "Browse by Customer", "Daily Log", "Search & Export"])
+    page = st.sidebar.radio("메뉴", ["Add Entry", "Customer Overview", "Project Overview", "Daily Log", "Search & Export"])
     if page == "Add Entry":
         entry_form()
-    elif page == "Browse by Customer":
+    elif page == "Customer Overview":
         page_customer()
+    elif page == "Project Overview":
+        page_project()
     elif page == "Daily Log":
         page_daily()
     else:
